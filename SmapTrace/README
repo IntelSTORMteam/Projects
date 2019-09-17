@@ -1,0 +1,69 @@
+/*
+ *  Intel provides this code “as-is” and disclaims all express and implied warranties, including without
+ *  limitation, the implied warranties of merchantability, fitness for a particular purpose, and non-infringement,
+ *  as well as any warranty arising from course of performance, course of dealing, or usage in trade. No license
+ *  (express or implied, by estoppel or otherwise) to any intellectual property rights is granted by Intel providing
+ *  this code.
+ *  This code is preliminary, may contain errors and is subject to change without notice.
+ *  Intel technologies' features and benefits depend on system configuration and may require enabled hardware,
+ *  software or service activation. Performance varies depending on system configuration.  Any differences in your
+ *  system hardware, software or configuration may affect your actual performance.  No product or component can be
+ *  absolutely secure.
+ *  Intel and the Intel logo are trademarks of Intel Corporation in the United States and other countries.
+ *  *Other names and brands may be claimed as the property of others.
+ *  © Intel Corporation
+ */
+
+
+STORM - STrategic Offensive Research & Mitigations Team - Intel Corporation
+===========================================================================
+
+This is a windbg plugin which is a PoC implementation of the idea 
+disclosed at H2HC 2018 talk "SMAPwn: a faster way for detecting double 
+fetch vulnerabilities in Windows kernel" (available at:
+https://github.com/h2hconference/2018/blob/master/H2HC%20-%20Artem%20Shishkin%20-%20SMAPwn.pptx ).
+
+
+How to build
+===========================================================================
+
+Open "SmapTrace.sln" file in Visual Studio 2017 then use
+"Build solution" button in Visual Studio 2017.
+
+Notes
+===========================================================================
+Please disable KPTI (Kernel Page Table Isolation) before using this plugin.
+In order to do so, you may use cmd.exe as Administrator with the following commands:
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v FeatureSettingsOverride /t REG_DWORD /d 3 /f
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management" /v FeatureSettingsOverrideMask /t REG_DWORD /d 3 /f
+
+
+What does it do?
+===========================================================================
+
+This plugin enables SMAP feature on CPU cores (Supported on BDW+).
+It also implements custom page fault and debug trap / fault 
+handlers for Windows kernel. The page fault handler filters SMAP 
+related events and logs them to the attached kernel debugger. 
+Custom debug handler is used to automatically resume target execution
+after logging the SMAP related event.
+
+The idea is to track kernel mode accesses to user memory using SMAP. 
+For further details refer to the H2HC 2018 presentation.
+
+Usage
+===========================================================================
+
+.load <path>\SmapTrace.dll
+!trfilter - set the module that is going to be tracked ("nt" by default)
+!trauto - start tracing in automatic mode
+!trman - start tracing in manual mode
+!trnext - resume until next SMAP event in manual mode
+!trstop - stop tracing
+.unload <path>\SmapTrace.dll
+
+
+LATEST VERSION OF THE PLUGIN AND DOCUMENTATION ON SMAPTRACE
+===========================================================================
+
+https://github.com/intelstormteam/Projects/tree/master/SmapTrace

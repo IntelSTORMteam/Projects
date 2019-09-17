@@ -1,0 +1,12 @@
+LIBRARY SmapTrace
+EXPORTS
+
+	DebugExtensionInitialize
+	DebugExtensionNotify
+	DebugExtensionUninitialize
+
+	trauto
+	trman
+	trnext
+	trstop
+	trfilter
