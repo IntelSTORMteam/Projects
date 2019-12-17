@@ -1,14 +1,3 @@
-# kcfi rules
-./kernel-3.19-rc4-shadow/arch/x86
-./kernel-3.19-rc4-shadow/build_tools/*
-./kernel-3.19-rc4-shadow/*.cfi
-./kernel-3.19-rc4-shadow/*.lock
-./kernel-3.19-rc4-shadow/cfi_files/*
-./kernel-3.19-rc4-shadow/vmlinux.*
-./kernel-3.19-rc4-shadow/data.thin
-./kernel-3.19-rc4-shadow/secondary*.tmp
-./kernel-3.19-rc4-shadow/*.dump
-./kernel-3.19-rc4-shadow/*.lua
 #
 # Normal rules
 #
