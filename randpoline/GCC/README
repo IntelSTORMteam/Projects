@@ -1,0 +1,74 @@
+/*
+ * Intel provides this code “as-is” and disclaims all express and implied warranties, including without
+ * limitation, the implied warranties of merchantability, fitness for a particular purpose, and non-infringement,
+ * as well as any warranty arising from course of performance, course of dealing, or usage in trade. No license
+ * (express or implied, by estoppel or otherwise) to any intellectual property rights is granted by Intel providing
+ * this code.
+ * This code is preliminary, may contain errors and is subject to change without notice.
+ * Intel technologies' features and benefits depend on system configuration and may require enabled hardware,
+ * software or service activation. Performance varies depending on system configuration.  Any differences in your
+ * system hardware, software or configuration may affect your actual performance.  No product or component can be
+ * absolutely secure.
+ * Intel and the Intel logo are trademarks of Intel Corporation in the United States and other countries.
+ * *Other names and brands may be claimed as the property of others.
+ * © Intel Corporation
+ */
+
+
+STORM - STrategic Offensive Research & Mitigations Team - Intel Corporation
+===========================================================================
+
+This GCC Plugin is an example implementation for Randpoline and was developed 
+with gcc version 6.4.0 (Debian 6.4.0-17), but also builds with gcc version 
+7.3.0 (Debian 7.3.0-19) and gcc version 8.2.0 (Debian 8.2.0-9). Compilation 
+was tested for all three versions with sqlite3 and the sqlite3 builtin TCL
+tests.
+
+Currently only 64-bit compilation is supported. Also, the Randpoline plugin 
+comes with a helper plugin named removereg, which if used by GCC will prevent
+the compiler from leveraging r13, hence reserving r13 for Randpoline's 
+purpose. 
+
+Projects require stdlib to build. For runtime randomization, special care is 
+to be taken around libc and other dependencies, the register r13 is required
+to be reserved for randpoline use only. Recompilation of libc and dependencies
+is recommended.
+
+
+How to build
+===========================================================================
+
+sudo apt-get install build-essential
+sudo apt-get install gcc-<ver>-plugin-dev
+make
+/usr/bin/gcc -fplugin=./randpoline.so target.c -o target
+
+
+What does it do?
+===========================================================================
+
+The GCC Randpoline Plugin inserts randpoline patches to binaries compiled 
+with GCC, in order to provide an alternative mitigation for Spectre Variant 
+2. More information on randpoline and Spectre Variant 2 can be found in the 
+respective Randpoline whitepaper (available on the same github as this 
+plugin).
+
+The plugin is implemented as a single pass, inserted after the GCC vartrack
+pass in the RTL portion of the compilation process. It replaces indirect 
+call and jump instructions with the dedicated randpoline instruction 
+sequence, and inserts the randpoline jump pads. 
+
+Please note, this plugin is to be seen as proof of concept. Certain corner
+cases of indirect branches exist that cannot currently be patched. The
+plugin issues a warning in such cases. Furthermore, we are aware there 
+might exist entirely different ways to implement the concept of randpoline.  
+
+Furthermore, the supporting Removereg plugin is designed to plainly stop 
+GCC from leveraging r13; inline assembly using r13 will need to be fixed
+manually. 
+
+
+LATEST VERSION OF THE PLUGIN AND DOCUMENTATION ON RANDPOLINE
+===========================================================================
+
+https://github.com/intelstormteam/Projects/tree/master/randpoline

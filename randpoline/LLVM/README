@@ -1,0 +1,54 @@
+/*
+ * Intel provides this code “as-is” and disclaims all express and implied
+ * warranties, including without limitation, the implied warranties of
+ * merchantability, fitness for a particular purpose, and non-infringement, as
+ * well as any warranty arising from course of performance, course of dealing,
+ * or usage in trade. No license (express or implied, by estoppel or otherwise)
+ * to any intellectual property rights is granted by Intel providing this code.
+ * This code is preliminary, may contain errors and is subject to change without
+ * notice. Intel technologies' features and benefits depend on system
+ * configuration and may require enabled hardware, software or service
+ * activation. Performance varies depending on system configuration. Any
+ * differences in your system hardware, software or configuration may affect
+ * your actual performance.  No product or component can be absolutely secure.
+ *
+ * Intel and the Intel logo are trademarks of Intel Corporation in the United
+ * States and other countries.
+ *
+ * Other names and brands may be claimed as the property of others.
+ *
+ * © Intel Corporation
+ */
+
+
+What does the LLVM Patch do?
+===========================================================================
+
+The patch makes the LLVM toolchain capable of understing the following
+parameters:
+
+(i) "-mllvm -enable-randpoline=load": reserves R13 and initializes it in the
+beginning of program execution to hold a random entry for a R11 thunk. All
+forward indirect branches are converted into the randpoline form, using the
+thunk as a trampoline for reaching the function intended in the control-flow.
+
+(ii) "-mllvm -enable-randpoline=dynamic": does not reserve R13. Instead,
+generates a new thunk index on every forward indirect branch and use it to reach
+the function intended in the control-flow. Uses R10 and R11.
+
+(iii) "-mllvm -enable-randpoline=preserv": does not instrument the binary with
+the mitigation. Only reserves R13. Meant to be used for compiling libraries.
+
+How to apply the patch?
+===========================================================================
+cd /tmp
+wget http://releases.llvm.org/9.0.0/llvm-9.0.0.src.tar.xz
+tar -xvf llvm-9.0.0.src.tar.xz
+patch -p1 < 0001-Randpoline-mitigation.patch
+
+then build LLVM as desired :)
+
+LATEST VERSION OF THE PLUGIN AND DOCUMENTATION ON RANDPOLINE
+===========================================================================
+
+https://github.com/intelstormteam/Projects/tree/master/randpoline

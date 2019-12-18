@@ -18,24 +18,26 @@
 STORM - STrategic Offensive Research & Mitigations Team - Intel Corporation
 ===========================================================================
 
-This GCC Plugin is an example implementation for Randpoline and was developed 
-with gcc version 6.4.0 (Debian 6.4.0-17), but also builds with gcc version 
-7.3.0 (Debian 7.3.0-19) and gcc version 8.2.0 (Debian 8.2.0-9). Compilation 
-was tested for all three versions with sqlite3 and the sqlite3 builtin TCL
-tests.
+Randpoline is a mitigation for side-channel attacks on forward indirect
+branches. In this project you will find two different implementations: a GCC
+plugin, which can be used without the need of rebuilding the compiler, and a
+patch for LLVM, which can be merged and built with the upstream LLVM. There is
+also a tool called "Shaker", which can be used to modify the random value used
+by randpoline in the LLVM implementation.
 
-Currently only 64-bit compilation is supported. Also, the Randpoline plugin 
+Currently only 64-bit compilation is supported. Also, the Randpoline plugin
 comes with a helper plugin named removereg, which if used by GCC will prevent
-the compiler from leveraging r13, hence reserving r13 for Randpoline's 
-purpose. 
+the compiler from leveraging r13, hence reserving r13 for Randpoline's
+purpose. LLVM supports the reservation of r13 within its patch, through the
+option "-mllvm --enable-randpoline=preserve".
 
-Projects require stdlib to build. For runtime randomization, special care is 
+Projects require stdlib to build. For runtime randomization, special care is
 to be taken around libc and other dependencies, the register r13 is required
 to be reserved for randpoline use only. Recompilation of libc and dependencies
 is recommended.
 
 
-How to build
+How to build the GCC Plugin
 ===========================================================================
 
 sudo apt-get install build-essential
@@ -44,29 +46,55 @@ make
 /usr/bin/gcc -fplugin=./randpoline.so target.c -o target
 
 
-What does it do?
+What does the GCC Plugin do?
 ===========================================================================
 
-The GCC Randpoline Plugin inserts randpoline patches to binaries compiled 
-with GCC, in order to provide an alternative mitigation for Spectre Variant 
-2. More information on randpoline and Spectre Variant 2 can be found in the 
-respective Randpoline whitepaper (available on the same github as this 
+The GCC Randpoline Plugin inserts randpoline patches to binaries compiled
+with GCC, in order to provide an alternative mitigation for Spectre Variant
+2. More information on randpoline and Spectre Variant 2 can be found in the
+respective Randpoline whitepaper (available on the same github as this
 plugin).
 
 The plugin is implemented as a single pass, inserted after the GCC vartrack
-pass in the RTL portion of the compilation process. It replaces indirect 
-call and jump instructions with the dedicated randpoline instruction 
-sequence, and inserts the randpoline jump pads. 
+pass in the RTL portion of the compilation process. It replaces indirect
+call and jump instructions with the dedicated randpoline instruction
+sequence, and inserts the randpoline jump pads.
 
 Please note, this plugin is to be seen as proof of concept. Certain corner
 cases of indirect branches exist that cannot currently be patched. The
-plugin issues a warning in such cases. Furthermore, we are aware there 
-might exist entirely different ways to implement the concept of randpoline.  
+plugin issues a warning in such cases. Furthermore, we are aware there
+might exist entirely different ways to implement the concept of randpoline.
 
-Furthermore, the supporting Removereg plugin is designed to plainly stop 
+Furthermore, the supporting Removereg plugin is designed to plainly stop
 GCC from leveraging r13; inline assembly using r13 will need to be fixed
-manually. 
+manually.
 
+
+What does the LLVM Patch do?
+===========================================================================
+
+The patch makes the LLVM toolchain capable of understing the following
+parameters:
+
+(i) "-mllvm -enable-randpoline=load": reserves R13 and initializes it in the
+beginning of program execution to hold a random entry for a R11 thunk. All
+forward indirect branches are converted into the randpoline form, using the
+thunk as a trampoline for reaching the function intended in the control-flow.
+
+(ii) "-mllvm -enable-randpoline=dynamic": does not reserve R13. Instead,
+generates a new thunk index on every forward indirect branch and use it to reach
+the function intended in the control-flow. Uses R10 and R11.
+
+(iii) "-mllvm -enable-randpoline=preserv": does not instrument the binary with
+the mitigation. Only reserves R13. Meant to be used for compiling libraries.
+
+
+What does the Shaker do?
+===========================================================================
+
+This tool attaches to a program using ptrace and regenerates the thunk index
+randomly. This is a useful heuristics to provide robusteness agains brute-force
+attacks. This is only compatible with the LLVM version of randpoline.
 
 LATEST VERSION OF THE PLUGIN AND DOCUMENTATION ON RANDPOLINE
 ===========================================================================
