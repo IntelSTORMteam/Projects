@@ -14,14 +14,12 @@
  * © Intel Corporation
  */
 
-- There are multiple possibilities to implement Randpoline, we've chosen one of them, be sure to read the whitepaper 
-for more information on drawbacks and advantages
+- There are multiple possibilities to implement Randpoline, we've chosen one of them, be sure to read the whitepaper for more information on drawbacks and advantages
 
-- The current implementation does not support 32-bits binaries and is not compatible with older versions of GCC (read 
-the README file for information on versions tested)
+- The current implementation does not support 32-bits binaries and is not compatible with older versions of GCC (read the README file for information on versions tested)
 
-- In certain corner cases of indirect branches, the current implementation of the plugin cannot apply a mitigation. 
-In such cases a compiler warning will be issued.  
+- In certain corner cases of indirect branches, the current implementation of the plugin cannot apply a mitigation. In such cases a compiler warning will be issued.
 
-- The Removereg supporting plugin will only stop GCC from allocating r13 at compile time, inline assembly using r13
-will require manual fixing.
+- The Removereg supporting plugin will only stop GCC from allocating r13 at compile time, inline assembly using r13 will require manual fixing.
+
+- The llvm version, when compiling with -O2, may optimize out the nops from the r11 thunk. This breaks the assumed alignment.

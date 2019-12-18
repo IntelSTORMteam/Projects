@@ -17,3 +17,7 @@
 - Added runtime randomization of jump to the randpoline area 
 - Added an option to add a UD2 instruction after every jmp in the randpoline area, set by default
 - Added an option to inject a INT3 after every ret to be sure no speculation happens past a ret
+
+* 12/17/2019
+- Added llvm patch for randpoline
+- Added shaker tool, which randomizes r13 on the fly, through ptrace

@@ -1,0 +1,449 @@
+From 039f9bbc249c376b1f208fbb5be0a0e1a94376ae Mon Sep 17 00:00:00 2001
+From: Joao Moreira <joao.moreira@intel.com>
+Date: Wed, 6 Nov 2019 14:33:07 -0800
+Subject: [PATCH] Randpoline mitigation
+
+Supports the following arguments:
+- load: will generate random number during object load through a constructor.
+- dynamic: will regenerate a new random number on every fwd indirect branch.
+- preserve: code is not instrumented with mitigation, but preserves R13 to be
+properly linked/used with randpoline binaries.
+---
+ llvm/lib/CodeGen/TargetPassConfig.cpp    |   3 +
+ llvm/lib/Target/X86/CMakeLists.txt       |   1 +
+ llvm/lib/Target/X86/X86.h                |   5 +
+ llvm/lib/Target/X86/X86Randpoline.cpp    | 312 +++++++++++++++++++++++++++++++
+ llvm/lib/Target/X86/X86RegisterInfo.cpp  |   7 +
+ llvm/lib/Target/X86/X86TargetMachine.cpp |   9 +
+ 6 files changed, 337 insertions(+)
+ create mode 100644 llvm/lib/Target/X86/X86Randpoline.cpp
+
+diff --git a/llvm/lib/CodeGen/TargetPassConfig.cpp b/llvm/lib/CodeGen/TargetPassConfig.cpp
+index 36df0269..7c7d64fc 100644
+--- a/llvm/lib/CodeGen/TargetPassConfig.cpp
++++ b/llvm/lib/CodeGen/TargetPassConfig.cpp
+@@ -52,6 +52,9 @@ using namespace llvm;
+ cl::opt<bool> EnableIPRA("enable-ipra", cl::init(false), cl::Hidden,
+                          cl::desc("Enable interprocedural register allocation "
+                                   "to reduce load/store at procedure calls."));
++cl::opt<std::string> EnableRandpoline("enable-randpoline",
++    cl::ValueOptional, cl::desc("Enable randpoline mitigation"),
++    cl::value_desc("pass-name"), cl::init("disabled"), cl::Hidden);
+ static cl::opt<bool> DisablePostRASched("disable-post-ra", cl::Hidden,
+     cl::desc("Disable Post Regalloc Scheduler"));
+ static cl::opt<bool> DisableBranchFold("disable-branch-fold", cl::Hidden,
+diff --git a/llvm/lib/Target/X86/CMakeLists.txt b/llvm/lib/Target/X86/CMakeLists.txt
+index ed34a59d..92873c50 100644
+--- a/llvm/lib/Target/X86/CMakeLists.txt
++++ b/llvm/lib/Target/X86/CMakeLists.txt
+@@ -55,6 +55,7 @@ set(sources
+   X86MacroFusion.cpp
+   X86OptimizeLEAs.cpp
+   X86PadShortFunction.cpp
++  X86Randpoline.cpp
+   X86RegisterBankInfo.cpp
+   X86RegisterInfo.cpp
+   X86RetpolineThunks.cpp
+diff --git a/llvm/lib/Target/X86/X86.h b/llvm/lib/Target/X86/X86.h
+index a95f6843..c120eaed 100644
+--- a/llvm/lib/Target/X86/X86.h
++++ b/llvm/lib/Target/X86/X86.h
+@@ -62,6 +62,10 @@ FunctionPass *createX86PadShortFunctions();
+ /// instructions, in order to eliminate execution delays in some processors.
+ FunctionPass *createX86FixupLEAs();
+ 
++/// Return a pass that convert indirect branches into randpoline-based
++/// indirect branches, as a mitigation for Spectre.
++FunctionPass *createX86Randpoline();
++
+ /// Return a pass that removes redundant LEA instructions and redundant address
+ /// recalculations.
+ FunctionPass *createX86OptimizeLEAs();
+@@ -132,6 +136,7 @@ FunctionPass *createX86SpeculativeLoadHardeningPass();
+ void initializeEvexToVexInstPassPass(PassRegistry &);
+ void initializeFixupBWInstPassPass(PassRegistry &);
+ void initializeFixupLEAPassPass(PassRegistry &);
++void initializeX86RandpolinePassPass(PassRegistry &);
+ void initializeFPSPass(PassRegistry &);
+ void initializeWinEHStatePassPass(PassRegistry &);
+ void initializeX86AvoidSFBPassPass(PassRegistry &);
+diff --git a/llvm/lib/Target/X86/X86Randpoline.cpp b/llvm/lib/Target/X86/X86Randpoline.cpp
+new file mode 100644
+index 00000000..3ce798a3
+--- /dev/null
++++ b/llvm/lib/Target/X86/X86Randpoline.cpp
+@@ -0,0 +1,312 @@
++//===------ X86Randpoline.cpp - Spectre mitigation ------------------------===//
++//
++// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
++// See https://llvm.org/LICENSE.txt for license information.
++// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
++//
++//===----------------------------------------------------------------------===//
++//
++// This file defines the pass that applies the randpoline spectre mitigation to
++// indirect branches. This creates a random offset-based, low-latency,
++// trampoline for indirect branch instructions, as described in [1]. This is a
++// mitigation for side-channel security vulnerabilities.
++//
++// [1] - https://github.com/intelstormteam/Papers/blob/master/2019-Randpoline...
++// ..._A_Software_Mitigation_for_Branch_Target_Injection_Attacks_v1.42.pdf
++//
++//===----------------------------------------------------------------------===//
++
++#include "X86.h"
++#include "X86InstrInfo.h"
++#include "X86Subtarget.h"
++#include "llvm/ADT/Statistic.h"
++#include "llvm/CodeGen/MachineFunction.h"
++#include "llvm/CodeGen/MachineFunctionPass.h"
++#include "llvm/CodeGen/MachineInstrBuilder.h"
++#include "llvm/CodeGen/MachineModuleInfo.h"
++#include "llvm/CodeGen/Passes.h"
++#include "llvm/CodeGen/TargetSchedule.h"
++#include "llvm/CodeGen/TargetPassConfig.h"
++#include "llvm/IR/IRBuilder.h"
++#include "llvm/IR/Instructions.h"
++#include "llvm/IR/Module.h"
++#include "llvm/Support/CommandLine.h"
++#include "llvm/Support/Debug.h"
++#include "llvm/Support/raw_ostream.h"
++#include "llvm/Transforms/Utils/ModuleUtils.h"
++#include <stdio.h>
++
++extern llvm::cl::opt<std::string> EnableRandpoline;
++
++using namespace llvm;
++
++#define RANDPOLINE_DESC "X86 Randpoline"
++#define RANDPOLINE_NAME "x86-randpoline"
++
++#define DEBUG_TYPE RANDPOLINE_NAME
++
++namespace {
++class X86RandpolinePass: public MachineFunctionPass {
++
++public:
++  static char ID;
++
++  StringRef getPassName() const override { return RANDPOLINE_DESC; }
++
++  X86RandpolinePass() : MachineFunctionPass(ID) { }
++
++  bool runOnMachineFunction(MachineFunction &MF) override;
++
++  void createRandinit(Module &M, MachineFunction *Thunk);
++
++  MachineFunction* createR11Thunk(Module &M);
++
++  void applyDetours(Module &M, MachineFunction &MF);
++
++  bool whitelist(StringRef fname);
++
++private:
++  TargetSchedModel TSM;
++  MachineModuleInfo *MMI;
++  const TargetMachine *TM;
++  bool Is64Bit;
++  const X86Subtarget *STI;
++  const X86InstrInfo *TII;
++  bool initialized = false;
++  bool dynamic = false;
++};
++}
++
++char X86RandpolinePass::ID = 0;
++
++INITIALIZE_PASS(X86RandpolinePass, RANDPOLINE_NAME, RANDPOLINE_DESC, false,
++				false)
++
++FunctionPass *llvm::createX86Randpoline() { return new X86RandpolinePass(); }
++
++bool X86RandpolinePass::runOnMachineFunction(MachineFunction &MF)
++{
++  LLVM_DEBUG(dbgs() << getPassName() << '\n');
++
++  // dynamic: regenerates the random number on every call
++  // load: generates the random number with a constructor function on load
++  if ((StringRef(EnableRandpoline.getValue()).equals("dynamic")))
++    dynamic = true;
++
++  TM = &MF.getTarget();
++  STI = &MF.getSubtarget<X86Subtarget>();
++  TII = STI->getInstrInfo();
++  Is64Bit = TM->getTargetTriple().getArch() == Triple::x86_64;
++
++  // TODO: implement 32bit support
++  if (!Is64Bit) return true;
++  if (whitelist(MF.getName())) return true;
++
++  MMI = &getAnalysis<MachineModuleInfo>();
++  Module &M = const_cast<Module &>(*MMI->getModule());
++
++  // create r11 thunk and Randinit once
++  if (!initialized) {
++    MachineFunction *thunk = createR11Thunk(M);
++    if (!dynamic) createRandinit(M, thunk);
++    initialized = true;
++  }
++
++  applyDetours(M, MF);
++
++  return true;
++}
++
++// List of functions which should be bypassed
++bool X86RandpolinePass::whitelist(StringRef fname)
++{
++  if (fname.equals("__randinit")) return true;
++  if (fname.equals("__randpoline_thunk_r11")) return true;
++  return false;
++}
++
++// Creates __randinit function, used in the load approach
++void X86RandpolinePass::createRandinit(Module &M, MachineFunction *Thunk)
++{
++  std::string Name = "__randinit";
++
++  LLVMContext &Ctx = M.getContext();
++
++  auto Type = FunctionType::get(Type::getVoidTy(Ctx), false);
++  Function *F = Function::Create(Type, GlobalValue::WeakAnyLinkage, Name, &M);
++  F->setVisibility(GlobalValue::HiddenVisibility);
++  F->setComdat(M.getOrInsertComdat(Name));
++
++  AttrBuilder B;
++  B.addAttribute(llvm::Attribute::Naked);
++  F->addAttributes(llvm::AttributeList::FunctionIndex, B);
++
++  BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", F);
++  IRBuilder<> Builder(Entry);
++
++  Builder.CreateRetVoid();
++
++  DebugLoc Loc;
++
++  MachineFunction &MF = MMI->getOrCreateMachineFunction(*F);
++  MachineBasicBlock *EntryMBB = MF.CreateMachineBasicBlock(Entry);
++
++  MF.insert(MF.end(), EntryMBB);
++
++  BuildMI(EntryMBB, DebugLoc(), TII->get(X86::XOR64rr), X86::R13)
++    .addReg(X86::R13, RegState::Undef)
++    .addReg(X86::R13, RegState::Undef);
++  BuildMI(EntryMBB, DebugLoc(), TII->get(X86::RDRAND16r))
++    .addReg(X86::R13);
++  BuildMI(EntryMBB, DebugLoc(), TII->get(X86::AND16ri), X86::R13)
++    .addReg(X86::R13)
++    .addImm(0xfff8);
++  BuildMI(EntryMBB, DebugLoc(), TII->get(X86::MOV64ri), X86::R11)
++    .addGlobalAddress(M.getNamedValue("__randpoline_thunk_r11"));
++  BuildMI(EntryMBB, DebugLoc(), TII->get(X86::ADD64rr), X86::R13)
++    .addReg(X86::R13)
++    .addReg(X86::R11);
++
++  appendToGlobalCtors(M, F, 0);
++}
++
++// Creates R11 thunk function
++MachineFunction* X86RandpolinePass::createR11Thunk(Module &M)
++{
++  std::string Name = "__randpoline_thunk_r11";
++
++  LLVMContext &Ctx = M.getContext();
++
++  auto Type = FunctionType::get(Type::getVoidTy(Ctx), false);
++  Function *F = Function::Create(Type, GlobalValue::WeakAnyLinkage, Name, &M);
++  F->setVisibility(GlobalValue::HiddenVisibility);
++  F->setComdat(M.getOrInsertComdat(Name));
++
++  AttrBuilder B;
++  B.addAttribute(llvm::Attribute::NoUnwind);
++  B.addAttribute(llvm::Attribute::Naked);
++  F->addAttributes(llvm::AttributeList::FunctionIndex, B);
++
++  BasicBlock *Entry = BasicBlock::Create(Ctx, "entry", F);
++  IRBuilder<> Builder(Entry);
++
++  Builder.CreateRetVoid();
++
++  MachineFunction &MF = MMI->getOrCreateMachineFunction(*F);
++  MachineBasicBlock *EntryMBB = MF.CreateMachineBasicBlock(Entry);
++
++  MF.insert(MF.end(), EntryMBB);
++
++  for (unsigned i = 0; i < 0xfff8; ++i) {
++    BuildMI(EntryMBB, DebugLoc(), TII->get(X86::JMP64r), X86::R11);
++    BuildMI(EntryMBB, DebugLoc(), TII->get(X86::TRAP));
++    BuildMI(EntryMBB, DebugLoc(), TII->get(X86::NOOP));
++    BuildMI(EntryMBB, DebugLoc(), TII->get(X86::NOOP));
++    BuildMI(EntryMBB, DebugLoc(), TII->get(X86::NOOP));
++  }
++
++  return &MF;
++}
++
++// Applies randpoline approach in call *mem instructions
++void X86RandpolinePass::applyDetours(Module &M, MachineFunction &MF)
++{
++  MachineInstrBuilder MIB;
++  MachineFunction::iterator bb, bbe;
++  MachineBasicBlock::iterator i, ie;
++  std::list<MachineBasicBlock::iterator> mustRemove;
++  unsigned numOps;
++  unsigned thunkReg;
++
++  // * if dynamic, we use R10 to store the random value, because it is a scratch
++  // register and we don't want to have to save/restore the register. this is
++  // safe but introduces a lot of overhead.
++
++  // * if load, we use R13, because it assumes other libraries will preserve it.
++  // This way, if a non-instrumented library function clobbers R13, it will be
++  // required to restore its original value. Yet, this approach is broken if the
++  // library function calls back into instrumented code, as the instrumented
++  // code will assume R13 is sane, but it may have been changed by the library.
++  // This problem can be observed when glibc runs the object constructors
++  // (execution breaks when randinit changes R13 and returns to libc_csu_init).
++  // The only way to ensure safety is by generating the library code without
++  // using R13. This can be achieved with -mllvm -enable-randpoline=preserve.
++
++  if (dynamic) thunkReg = X86::R10;
++  else thunkReg = X86::R13;
++
++  // * if dynamic, instrument as follows:
++  // for each "call op" or "jmp op", create a sequence
++  // xor r13, r13
++  // rdrand r13w
++  // and r13w, 0xfff8
++  // mov &thunk, r11
++  // add r13, r11
++  // mov op, r11
++  // call/jmp *r13
++  //
++  // * if load, instrument as follows:
++  // for each "call op" or "jmp op", create a sequence
++  // mov op, r11; call/jmp *r13
++
++  for (bb = MF.begin(), bbe = MF.end(); bb != bbe; ++bb)
++  {
++    for (i = bb->begin(), ie = bb->end(); i != ie; ++i)
++    {
++      unsigned opc = i->getOpcode();
++
++      // handle r10 = thunk base + random offset
++      if ((opc == X86::CALL64m || opc == X86::JMP64m ||
++           opc == X86::CALL64r || opc == X86::JMP64r ||
++           opc == X86::TAILJMPm64 || opc == X86::TAILJMPr64) && dynamic)
++      {
++        BuildMI(*bb, i, DebugLoc(), TII->get(X86::XOR64rr), thunkReg)
++          .addReg(thunkReg, RegState::Undef)
++          .addReg(thunkReg, RegState::Undef);
++        BuildMI(*bb, i, DebugLoc(), TII->get(X86::RDRAND16r))
++          .addReg(thunkReg);
++        BuildMI(*bb, i, DebugLoc(), TII->get(X86::AND16ri), thunkReg)
++          .addReg(thunkReg)
++          .addImm(0xfff8);
++        BuildMI(*bb, i, DebugLoc(), TII->get(X86::MOV64ri), X86::R11)
++          .addGlobalAddress(M.getNamedValue("__randpoline_thunk_r11"));
++        BuildMI(*bb, i, DebugLoc(), TII->get(X86::ADD64rr), thunkReg)
++          .addReg(thunkReg)
++          .addReg(X86::R11);
++      }
++
++      // handle indirect branches through memory operands
++      if (opc == X86::CALL64m || opc == X86::JMP64m || opc == X86::TAILJMPm64)
++      {
++        MIB = BuildMI(*bb, i, DebugLoc(), TII->get(X86::MOV64rm), X86::R11);
++        numOps = i->getNumOperands();
++        for (unsigned op = 0; op < numOps; op++) MIB.add(i->getOperand(op));
++      }
++
++      // handle indirect branches through registers
++      if (opc == X86::CALL64r || opc == X86::JMP64r || opc == X86::TAILJMPr64)
++        BuildMI(*bb, i, DebugLoc(), TII->get(X86::MOV64rr), X86::R11)
++          .add(i->getOperand(0));
++
++      // create new low latency call to thunk and mark old call for removal
++      if (opc == X86::CALL64m || opc == X86::CALL64r) {
++        MIB = BuildMI(*bb, i, DebugLoc(), TII->get(X86::CALL64r), thunkReg);
++        mustRemove.push_back(i);
++      }
++
++      // create new low latency jump to thunk and mark old jump for removal
++      if (opc == X86::JMP64m || opc == X86::JMP64r ||
++          opc == X86::TAILJMPm64 || opc == X86::TAILJMPr64) {
++        MIB = BuildMI(*bb, i, DebugLoc(), TII->get(X86::JMP64r), thunkReg);
++        mustRemove.push_back(i);
++      }
++    }
++  }
++
++  // remove all instructions marked for removal
++  std::list<MachineBasicBlock::iterator>::iterator rm, rme;
++  for (rm = mustRemove.begin(), rme = mustRemove.end(); rm != rme; rm++) {
++    MachineBasicBlock::iterator rmi = *rm;
++    rmi->removeFromParent();
++  }
++}
+diff --git a/llvm/lib/Target/X86/X86RegisterInfo.cpp b/llvm/lib/Target/X86/X86RegisterInfo.cpp
+index 2e2f1f9e..e329343a 100644
+--- a/llvm/lib/Target/X86/X86RegisterInfo.cpp
++++ b/llvm/lib/Target/X86/X86RegisterInfo.cpp
+@@ -37,6 +37,8 @@ using namespace llvm;
+ #define GET_REGINFO_TARGET_DESC
+ #include "X86GenRegisterInfo.inc"
+ 
++extern cl::opt<std::string> EnableRandpoline;
++
+ static cl::opt<bool>
+ EnableBasePointer("x86-use-base-pointer", cl::Hidden, cl::init(true),
+           cl::desc("Enable use of a base pointer for complex stack frames"));
+@@ -512,6 +514,11 @@ BitVector X86RegisterInfo::getReservedRegs(const MachineFunction &MF) const {
+   BitVector Reserved(getNumRegs());
+   const X86FrameLowering *TFI = getFrameLowering(MF);
+ 
++  // If randopline is enabled, reserve R13 for it.
++  StringRef randpoline = EnableRandpoline.getValue();
++  if (randpoline.equals("preserve") || randpoline.equals("load"))
++    Reserved.set(X86::R13);
++
+   // Set the floating point control register as reserved.
+   Reserved.set(X86::FPCW);
+ 
+diff --git a/llvm/lib/Target/X86/X86TargetMachine.cpp b/llvm/lib/Target/X86/X86TargetMachine.cpp
+index 0cbf1389..c87de546 100644
+--- a/llvm/lib/Target/X86/X86TargetMachine.cpp
++++ b/llvm/lib/Target/X86/X86TargetMachine.cpp
+@@ -51,6 +51,8 @@
+ 
+ using namespace llvm;
+ 
++extern cl::opt<std::string> EnableRandpoline;
++
+ static cl::opt<bool> EnableMachineCombinerPass("x86-machine-combiner",
+                                cl::desc("Enable the machine combiner pass"),
+                                cl::init(true), cl::Hidden);
+@@ -71,6 +73,7 @@ extern "C" void LLVMInitializeX86Target() {
+   initializeFixupBWInstPassPass(PR);
+   initializeEvexToVexInstPassPass(PR);
+   initializeFixupLEAPassPass(PR);
++  initializeX86RandpolinePassPass(PR);
+   initializeFPSPass(PR);
+   initializeX86CallFrameOptimizationPass(PR);
+   initializeX86CmovConverterPassPass(PR);
+@@ -514,6 +517,12 @@ void X86PassConfig::addPreEmitPass() {
+   }
+   addPass(createX86DiscriminateMemOpsPass());
+   addPass(createX86InsertPrefetchPass());
++
++  StringRef randpoline = EnableRandpoline.getValue();
++  if (randpoline.equals("load") || randpoline.equals("dynamic"))
++    addPass(createX86Randpoline());
++  else if (!(randpoline.equals("disabled") || randpoline.equals("preserve")))
++    dbgs() << "Unknown -enable-randpoline option.\n";
+ }
+ 
+ void X86PassConfig::addPreEmitPass2() {
+-- 
+2.16.4
+
